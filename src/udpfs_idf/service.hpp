@@ -51,6 +51,8 @@ public:
     // "requests=... cached=... malformed=... errors=... idle_closes=...
     // bytes_read=... bytes_written=... open=..." (approximate while busy).
     [[nodiscard]] std::string stats_line() const;
+    // Handles open at the last request or idle check (any thread).
+    [[nodiscard]] unsigned open_handles() const;
 
 private:
     struct impl;

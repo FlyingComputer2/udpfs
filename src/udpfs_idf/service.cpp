@@ -217,6 +217,11 @@ bool service::start(const config &cfg)
     return true;
 }
 
+unsigned service::open_handles() const
+{
+    return impl_->open_handles.load();
+}
+
 std::string service::stats_line() const
 {
     const impl &m = *impl_;
