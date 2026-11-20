@@ -467,7 +467,17 @@ void server::dispatch(uint8_t op, uint32_t reqid, wire::reader &r, std::vector<u
             }
             if (::stat(path.c_str(), &st) != 0)
             {
-                return fail(errno);
+                // ESP-IDF's VFS cannot stat a mount point (/sdcard, /winject) but
+                // can open it as a directory.
+                const int e = errno;
+                DIR *d = ::opendir(path.c_str());
+                if (!d)
+                {
+                    return fail(e);
+                }
+                ::closedir(d);
+                st = {};
+                st.st_mode = S_IFDIR | 0777;
             }
         }
         ok(0);

@@ -250,6 +250,8 @@ in flight moves ~100 KB/s, until the link's own rate limits it.
 
 ESP-IDF's SPIFFS has no directories: names hold `/` (`/winject/a/b.txt` is one file),
 `MKDIR` / `RMDIR` fail with `ENOTSUP`, and `OPENDIR` on the mount point lists every file.
+ESP-IDF's VFS cannot `stat` a mount point (`/sdcard`, `/winject`); the server then answers `STAT`
+with a directory (mode 0777, size 0, mtime 0) when the path opens as one.
 
 Any SPIFFS or other SPI flash access turns the cache off while it runs. IDF then requires the
 calling task's stack to be in internal RAM (it asserts this in `spi_flash`). A server that can
