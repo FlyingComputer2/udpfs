@@ -2,7 +2,7 @@
 // retransmission (docs/protocol.md) and a window of requests in flight for bulk
 // reads, writes and checksums. Errors are native errno values (mapped from the
 // wire through the project's <udpfs_config.hpp>); ETIMEDOUT when the server
-// did not answer within the retries. One thread per client.
+// did not answer within give_up_ms. One thread per client.
 #pragma once
 
 #include <cstddef>
@@ -31,12 +31,26 @@ public:
 struct client_config
 {
     size_t max_datagram = 1400;
-    // Time to wait for a response before sending the request again.
-    int retransmit_ms = 400;
-    // Sends of one request before ETIMEDOUT.
-    int tries = 12;
+    // Resend timer (RFC 6298): smoothed round trip + 4 x its variation, from
+    // responses to requests sent once; initial_rto_ms until the first sample,
+    // clamped to [min_rto_ms, max_rto_ms]. Each resend of a request doubles its
+    // own timer (up to max_rto_ms).
+    // On the rover link (video sharing the air) the round trip varies 30-200 ms:
+    // below 200 ms the timer fired on late responses, and the resends cost more
+    // than they saved (photo 6-8 s instead of 3-4 s).
+    int initial_rto_ms = 400;
+    int min_rto_ms = 200;
+    int max_rto_ms = 3000;
+    // ETIMEDOUT when a request has no response this long after its first send.
+    int give_up_ms = 15000;
     // Bulk requests in flight.
-    size_t window = 8;
+    size_t window = 16;
+    // Requests up to this size (READ, STAT, ...: tens of bytes) are sent twice,
+    // dup_delay_ms apart, against request loss; a server drops the copy it has
+    // just answered (its dup_window_ms). 0 = never (default: on the rover link
+    // losses come in bursts, both copies went together, and it was slower).
+    size_t dup_max_bytes = 0;
+    int dup_delay_ms = 3;
     // First request id; 0 = random.
     uint32_t reqid_seed = 0;
 };
@@ -46,7 +60,10 @@ struct client_stats
     uint64_t requests = 0;
     uint64_t sends = 0; // including retransmissions
     uint64_t retransmits = 0;
-    uint64_t stray = 0; // responses matching no request in flight
+    uint64_t dups = 0;  // second copies of small requests
+    uint64_t stray = 0; // responses matching no request in flight (also the copy's)
+    double srtt_ms = 0; // smoothed round trip, 0 before the first sample
+    int rto_ms = 0;     // the resend timer now
 };
 
 // Called with bytes done and total (0 when unknown) during bulk transfers.
@@ -122,15 +139,18 @@ private:
     // response's payload points into *resp_bytes.
     int call(std::vector<uint8_t> req, std::vector<uint8_t> *resp_bytes, response *resp);
     int call_impl(std::vector<uint8_t> req, std::vector<uint8_t> *resp_bytes, response *resp,
-                  int retransmit_ms);
+                  int rto_floor_ms);
     // Runs requests from next() with up to window in flight; done() gets each
     // response (any order; its payload is valid during the call) and may return
     // an errno to stop.
     int pipeline(const std::function<bool(request *)> &next,
                  const std::function<int(const request &, const response &)> &done, size_t window);
+    // rto_floor_ms: the resend timer is at least this (CRC32 computes a while).
     int pipeline_impl(const std::function<bool(request *)> &next,
                       const std::function<int(const request &, const response &)> &done,
-                      size_t window, int retransmit_ms);
+                      size_t window, int rto_floor_ms);
+    [[nodiscard]] int rto(int floor_ms) const;
+    void rtt_sample(double ms);
     static bool parse(const std::vector<uint8_t> &bytes, response *r);
 
     transport &t_;
@@ -139,6 +159,9 @@ private:
     client_stats stats_;
     std::vector<uint8_t> rx_;
     std::vector<uint8_t> last_resp_; // the response done() is looking at
+    bool have_rtt_ = false;
+    double srtt_ = 0;
+    double rttvar_ = 0;
 };
 
 }  // namespace udpfs

@@ -194,6 +194,19 @@ int server::path_arg(std::string_view p, std::string *out) const
     return 0;
 }
 
+void server::remember(uint8_t op, int32_t handle, uint32_t reqid, uint64_t now_ms)
+{
+    if (cfg_.dup_window_ms == 0)
+    {
+        return;
+    }
+    if (recent_.size() >= 64)
+    {
+        recent_.pop_front();
+    }
+    recent_.push_back({op, handle, reqid, now_ms});
+}
+
 bool server::handle(const uint8_t *req, size_t n, uint64_t now_ms, std::vector<uint8_t> *resp)
 {
     if (n < wire::k_request_header || nullptr == resp)
@@ -221,6 +234,18 @@ bool server::handle(const uint8_t *req, size_t n, uint64_t now_ms, std::vector<u
         reader peek(req + wire::k_request_header, n - wire::k_request_header);
         key_handle = peek.i32();
     }
+    if (cfg_.dup_window_ms > 0)
+    {
+        for (const auto &r : recent_)
+        {
+            if (r.op == op && r.handle == key_handle && r.reqid == reqid &&
+                now_ms - r.at_ms < cfg_.dup_window_ms)
+            {
+                ++stats_.dup_dropped;
+                return false;
+            }
+        }
+    }
     const bool cache = cached_op(op);
     if (cache)
     {
@@ -230,12 +255,14 @@ bool server::handle(const uint8_t *req, size_t n, uint64_t now_ms, std::vector<u
             {
                 ++stats_.cached;
                 *resp = c.resp;
+                remember(op, key_handle, reqid, now_ms);
                 return true;
             }
         }
     }
 
     dispatch(op, reqid, r, resp);
+    remember(op, key_handle, reqid, now_ms);
 
     if (resp->size() >= wire::k_response_header)
     {

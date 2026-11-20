@@ -2,6 +2,7 @@
 
 #include <fcntl.h>
 
+#include <chrono>
 #include <deque>
 #include <fstream>
 #include <random>
@@ -30,7 +31,9 @@ public:
             return true;
         }
         std::vector<uint8_t> resp;
-        const auto now = ++clock_ms_;
+        const auto now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                   std::chrono::steady_clock::now().time_since_epoch())
+                                                   .count());
         const int copies = chance(dup_) ? 2 : 1;
         for (int i = 0; i < copies; ++i)
         {
@@ -72,14 +75,25 @@ private:
     double dup_;
     std::mt19937 rng_;
     std::deque<std::vector<uint8_t>> q_;
-    uint64_t clock_ms_ = 0;
 };
+
+// Copies 1 ms apart are filtered (3 ms window); resends come after >= 8 ms.
+server_config test_server()
+{
+    server_config s;
+    s.dup_window_ms = 3;
+    return s;
+}
 
 client_config fast()
 {
     client_config c;
-    c.retransmit_ms = 3;
-    c.tries = 200;
+    c.initial_rto_ms = 8;
+    c.min_rto_ms = 8;
+    c.max_rto_ms = 40;
+    c.give_up_ms = 30000;
+    c.dup_delay_ms = 1;
+    c.dup_max_bytes = 64; // exercise the copies and the server's filter
     c.window = 8;
     return c;
 }
@@ -99,7 +113,7 @@ std::vector<uint8_t> pattern(size_t n)
 TEST(ClientTest, BulkWriteReadAndCrcOverALossyLink)
 {
     udpfs_test::temp_dir dir;
-    server srv;
+    server srv(test_server());
     lossy_link link(srv, 0.2, 0.1, 1);
     client c(link, fast());
     const auto data = pattern(300 * 1024 + 77);
@@ -133,13 +147,15 @@ TEST(ClientTest, BulkWriteReadAndCrcOverALossyLink)
     EXPECT_EQ(wire::crc32(0, data.data(), data.size()), crc);
     EXPECT_EQ(0, c.close(fd));
     EXPECT_GT(c.stats().retransmits, 0u);
+    EXPECT_GT(c.stats().dups, 0u);
+    EXPECT_GT(srv.stats().dup_dropped, 0u);
     EXPECT_EQ(0u, srv.open_handles());
 }
 
 TEST(ClientTest, ListAndPathOpsOverALossyLink)
 {
     udpfs_test::temp_dir dir;
-    server srv;
+    server srv(test_server());
     lossy_link link(srv, 0.25, 0.2, 2);
     client c(link, fast());
     ASSERT_EQ(0, c.mkdir(dir / "d", 0755));
@@ -176,8 +192,9 @@ TEST(ClientTest, NoServerTimesOut)
         int recv(uint8_t *, size_t, int) override { return 0; }
     } s;
     client_config cfg;
-    cfg.retransmit_ms = 1;
-    cfg.tries = 3;
+    cfg.initial_rto_ms = 1;
+    cfg.min_rto_ms = 1;
+    cfg.give_up_ms = 20;
     client c(s, cfg);
     wire::stat_block st;
     EXPECT_EQ(ETIMEDOUT, c.stat("/x", &st));

@@ -205,6 +205,13 @@ request's `fd` / `dir` for `CLOSE`, `LSEEK`, `READDIR`, `CLOSEDIR`, and −1 for
 operations (`OPEN`, `UNLINK`, `MKDIR`, `RMDIR`, `OPENDIR`, `RENAME`). A request whose key is in the cache gets the cached response again, byte for byte,
 without running. The cache is cleared at the idle timeout.
 
+## Copies
+
+A client may send a small request twice in a row against request loss. The server answers a
+request once per `dup_window_ms` (default 30): a repeat of one it answered (or answered from the
+reply cache) less than that long ago gets no response, so the copy does not cost a second
+response. A client's resend timer must stay above the window.
+
 ## Idle timeout
 
 When no request arrives for `idle_timeout_ms`, the server closes every handle and clears its
@@ -237,8 +244,10 @@ unusual C library writes its own.
 | `reply_cache` | 32 | cached responses ([above](#retransmission-and-the-reply-cache)) |
 | `idle_timeout_ms` | 30000 | [Idle timeout](#idle-timeout) |
 | `crc_max` | 1048576 | bytes one `CRC32` request covers at most (bounds the time it holds the server) |
+| `dup_window_ms` | 30 | [Copies](#copies) |
 
-The client has its own `max_datagram`, retransmit interval, retry limit and read/write window.
+The client has its own `max_datagram`, window (16), resend timer (RFC 6298 from the measured round
+trip, 200 ms to 3 s, doubled per resend of a request), give-up time (15 s) and copies (off).
 
 ## Size and rate
 

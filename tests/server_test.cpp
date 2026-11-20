@@ -55,6 +55,7 @@ protected:
 
     reply send(const std::vector<uint8_t> &b)
     {
+        now += 50; // past the server's dup_window_ms: these are resends, not copies
         std::vector<uint8_t> out;
         EXPECT_TRUE(srv.handle(b.data(), b.size(), now, &out));
         reply r;
@@ -355,6 +356,22 @@ TEST_F(ServerTest, ListOpenShowsHandles)
     EXPECT_EQ(dir / "lo", seen[f.ret].second);
     EXPECT_EQ(type_dir, seen[d.ret].first);
     EXPECT_EQ(dir.path(), seen[d.ret].second);
+}
+
+TEST_F(ServerTest, CopyInsideTheDupWindowGetsNoResponse)
+{
+    const std::string p = dir / "dup";
+    {
+        std::ofstream f(p);
+        f << "x";
+    }
+    auto b = req(op_stat, 31337);
+    writer(b).str(p);
+    std::vector<uint8_t> out;
+    ASSERT_TRUE(srv.handle(b.data(), b.size(), 5000, &out));
+    EXPECT_FALSE(srv.handle(b.data(), b.size(), 5010, &out)); // the client's second copy
+    EXPECT_EQ(1u, srv.stats().dup_dropped);
+    EXPECT_TRUE(srv.handle(b.data(), b.size(), 5100, &out)); // a resend after its timer
 }
 
 TEST_F(ServerTest, IdleTimeoutClosesHandles)

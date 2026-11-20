@@ -22,6 +22,11 @@ struct server_config
     size_t max_path = 255;
     size_t max_handles = 4;
     size_t reply_cache = 32;
+    // A repeat of a request answered less than this long ago gets no response:
+    // clients send small requests twice against request loss, and the second
+    // copy would otherwise cost a second (up to max_datagram) response. Must
+    // stay below the clients' minimum resend time.
+    uint32_t dup_window_ms = 30;
     uint32_t idle_timeout_ms = 30000;
     uint32_t crc_max = 1024 * 1024;
     // Start of the handle numbers, in [1, 2^30); 0 = derived from the clock. A
@@ -33,6 +38,7 @@ struct server_stats
 {
     uint64_t requests = 0;
     uint64_t cached = 0;      // answered from the reply cache
+    uint64_t dup_dropped = 0; // copies inside dup_window_ms, not answered
     uint64_t malformed = 0;   // EPROTO / EMSGSIZE / too short
     uint64_t errors = 0;      // ret -1 for any other reason
     uint64_t idle_closes = 0; // idle timeouts that closed something
@@ -85,11 +91,20 @@ private:
     handle_t *find(int32_t h);
     void close_handle(int32_t h);
     int path_arg(std::string_view p, std::string *out) const;
+    void remember(uint8_t op, int32_t handle, uint32_t reqid, uint64_t now_ms);
 
     server_config cfg_;
     std::map<int32_t, handle_t> handles_;
     int32_t next_handle_ = 1;
     std::deque<cached_reply> cache_;
+    struct recent
+    {
+        uint8_t op;
+        int32_t handle;
+        uint32_t reqid;
+        uint64_t at_ms;
+    };
+    std::deque<recent> recent_; // answered requests, for dup_window_ms
     uint64_t last_request_ms_ = 0;
     bool any_request_ = false;
     std::vector<uint8_t> buf_; // READ / CRC32 scratch

@@ -34,9 +34,12 @@ build/udpfs ls -l 192.168.253.19:/sdcard
 build/udpfs list_open 192.168.253.19                              # debug: open handles
 ```
 
-`HOST[:PORT]:/path` is the remote side, as with scp. Transfers keep 8 requests in flight (`-w`),
-resend after 400 ms (`-t`), and are checked with the server's CRC32 (`--no-verify` skips it); a
-download is written to `<file>.part` and renamed when it checks out.
+`HOST[:PORT]:/path` is the remote side, as with scp. Transfers keep 16 requests in flight (`-w`),
+resend on a timer that follows the measured round trip (RFC 6298, never below 200 ms:
+`--min-rto`), give up after 15 s without a response (`-T`), and are checked with the server's
+CRC32 (`--no-verify` skips it); a download is written to `<file>.part` and renamed when it checks
+out. `-v` prints the counters (requests, resends, round trip). Over the rover link with live
+video a 640 KB photo takes about 3.5 s (about 180 KB/s), 1.5-2 s with video paused.
 
 ## Tests
 

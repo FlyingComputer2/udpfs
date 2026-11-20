@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <deque>
 #include <map>
 #include <random>
@@ -75,28 +76,61 @@ bool client::parse(const std::vector<uint8_t> &bytes, response *r)
 int client::pipeline(const std::function<bool(request *)> &next,
                      const std::function<int(const request &, const response &)> &done, size_t window)
 {
-    return pipeline_impl(next, done, window, cfg_.retransmit_ms);
+    return pipeline_impl(next, done, window, 0);
+}
+
+int client::rto(int floor_ms) const
+{
+    double r = cfg_.initial_rto_ms;
+    if (have_rtt_)
+    {
+        r = srtt_ + std::max(1.0, 4 * rttvar_);
+    }
+    r = std::min<double>(std::max<double>(r, cfg_.min_rto_ms), cfg_.max_rto_ms);
+    return std::max(static_cast<int>(r), floor_ms);
+}
+
+void client::rtt_sample(double ms)
+{
+    if (!have_rtt_)
+    {
+        srtt_ = ms;
+        rttvar_ = ms / 2;
+        have_rtt_ = true;
+    }
+    else
+    {
+        rttvar_ = 0.75 * rttvar_ + 0.25 * std::abs(srtt_ - ms);
+        srtt_ = 0.875 * srtt_ + 0.125 * ms;
+    }
+    stats_.srtt_ms = srtt_;
+    stats_.rto_ms = rto(0);
 }
 
 int client::pipeline_impl(const std::function<bool(request *)> &next,
                           const std::function<int(const request &, const response &)> &done,
-                          size_t window, int retransmit_ms)
+                          size_t window, int rto_floor_ms)
 {
     struct slot
     {
         request req;
         uint8_t op;
         uint32_t reqid;
-        int64_t sent;
-        int tries;
+        int64_t first;   // first send
+        int64_t last;    // last send
+        int64_t timeout; // this request's resend timer
+        int64_t dup_at;  // when to send the copy; -1 = none due
+        bool resent;
     };
     std::deque<slot> inflight;
     bool more = true;
+    const bool dup_on = cfg_.dup_max_bytes > 0;
     auto send = [this](slot &s) {
         ++stats_.sends;
         (void)t_.send(s.req.bytes.data(), s.req.bytes.size());
-        s.sent = now_ms();
-        ++s.tries;
+    };
+    auto arm_dup = [&](slot &s, int64_t now) {
+        s.dup_at = dup_on && s.req.bytes.size() <= cfg_.dup_max_bytes ? now + cfg_.dup_delay_ms : -1;
     };
     for (;;)
     {
@@ -117,10 +151,14 @@ int client::pipeline_impl(const std::function<bool(request *)> &next,
                 return EMSGSIZE;
             }
             reader rd(r.bytes.data(), r.bytes.size());
-            slot s {std::move(r), rd.u8(), rd.u32(), 0, 0};
+            const uint8_t op = rd.u8();
+            const uint32_t reqid = rd.u32();
+            const int64_t now = now_ms();
+            slot s {std::move(r), op, reqid, now, now, rto(rto_floor_ms), -1, false};
             ++stats_.requests;
             inflight.push_back(std::move(s));
             send(inflight.back());
+            arm_dup(inflight.back(), now);
         }
         if (inflight.empty())
         {
@@ -130,7 +168,11 @@ int client::pipeline_impl(const std::function<bool(request *)> &next,
         const int64_t now = now_ms();
         for (const auto &s : inflight)
         {
-            wait = std::min(wait, s.sent + retransmit_ms - now);
+            wait = std::min(wait, s.last + s.timeout - now);
+            if (s.dup_at >= 0)
+            {
+                wait = std::min(wait, s.dup_at - now);
+            }
         }
         const int n = t_.recv(rx_.data(), rx_.size(), static_cast<int>(std::max<int64_t>(wait, 0)));
         if (n > 0)
@@ -151,6 +193,12 @@ int client::pipeline_impl(const std::function<bool(request *)> &next,
             {
                 slot s = std::move(*it);
                 inflight.erase(it);
+                // Karn: a resent request's response could answer any of its sends.
+                // Under the CRC floor the server computes for a while: no sample.
+                if (!s.resent && rto_floor_ms == 0)
+                {
+                    rtt_sample(static_cast<double>(now_ms() - s.first));
+                }
                 if (const int e = done(s.req, resp))
                 {
                     return e;
@@ -165,21 +213,31 @@ int client::pipeline_impl(const std::function<bool(request *)> &next,
         const int64_t t = now_ms();
         for (auto &s : inflight)
         {
-            if (t - s.sent >= retransmit_ms)
+            if (s.dup_at >= 0 && t >= s.dup_at)
             {
-                if (s.tries >= cfg_.tries)
+                ++stats_.dups;
+                send(s);
+                s.dup_at = -1;
+            }
+            if (t - s.last >= s.timeout)
+            {
+                if (t - s.first >= cfg_.give_up_ms)
                 {
                     return ETIMEDOUT;
                 }
                 ++stats_.retransmits;
                 send(s);
+                s.last = t;
+                s.resent = true;
+                s.timeout = std::min<int64_t>(s.timeout * 2, std::max(cfg_.max_rto_ms, rto_floor_ms));
+                arm_dup(s, t);
             }
         }
     }
 }
 
 int client::call_impl(std::vector<uint8_t> req, std::vector<uint8_t> *resp_bytes, response *resp,
-                      int retransmit_ms)
+                      int rto_floor_ms)
 {
     bool sent = false;
     int rc = pipeline_impl(
@@ -196,7 +254,7 @@ int client::call_impl(std::vector<uint8_t> req, std::vector<uint8_t> *resp_bytes
             *resp_bytes = last_resp_;
             return 0;
         },
-        1, retransmit_ms);
+        1, rto_floor_ms);
     if (rc)
     {
         return rc;
@@ -210,7 +268,7 @@ int client::call_impl(std::vector<uint8_t> req, std::vector<uint8_t> *resp_bytes
 
 int client::call(std::vector<uint8_t> req, std::vector<uint8_t> *resp_bytes, response *resp)
 {
-    return call_impl(std::move(req), resp_bytes, resp, cfg_.retransmit_ms);
+    return call_impl(std::move(req), resp_bytes, resp, 0);
 }
 
 int client::open(std::string_view path, int native_flags, uint32_t mode, int32_t *fd)
@@ -537,7 +595,7 @@ int client::crc32(int32_t fd, uint64_t off, uint64_t len, uint32_t seed, uint32_
     w.u32(seed);
     std::vector<uint8_t> rb;
     response r;
-    const int e = call_impl(std::move(b), &rb, &r, std::max(cfg_.retransmit_ms, k_crc_retransmit_ms));
+    const int e = call_impl(std::move(b), &rb, &r, k_crc_retransmit_ms);
     if (e)
     {
         return e;

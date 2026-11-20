@@ -81,7 +81,7 @@ struct service::impl
     std::vector<uint8_t> resp;
     bool started = false;
     // Stats copied after each request, for readers on other threads.
-    std::atomic<uint64_t> requests {0}, cached {0}, malformed {0}, errors {0}, idle_closes {0}, bytes_read {0},
+    std::atomic<uint64_t> requests {0}, cached {0}, dup_dropped {0}, malformed {0}, errors {0}, idle_closes {0}, bytes_read {0},
         bytes_written {0};
     std::atomic<uint32_t> open_handles {0};
 
@@ -90,6 +90,7 @@ struct service::impl
         const auto &s = srv->stats();
         requests = s.requests;
         cached = s.cached;
+        dup_dropped = s.dup_dropped;
         malformed = s.malformed;
         errors = s.errors;
         idle_closes = s.idle_closes;
@@ -227,9 +228,9 @@ std::string service::stats_line() const
     const impl &m = *impl_;
     char buf[224];
     std::snprintf(buf, sizeof(buf),
-                  "requests=%" PRIu64 " cached=%" PRIu64 " malformed=%" PRIu64 " errors=%" PRIu64
+                  "requests=%" PRIu64 " cached=%" PRIu64 " dup_dropped=%" PRIu64 " malformed=%" PRIu64 " errors=%" PRIu64
                   " idle_closes=%" PRIu64 " bytes_read=%" PRIu64 " bytes_written=%" PRIu64 " open=%u",
-                  m.requests.load(), m.cached.load(), m.malformed.load(), m.errors.load(), m.idle_closes.load(),
+                  m.requests.load(), m.cached.load(), m.dup_dropped.load(), m.malformed.load(), m.errors.load(), m.idle_closes.load(),
                   m.bytes_read.load(), m.bytes_written.load(), static_cast<unsigned>(m.open_handles.load()));
     return buf;
 }

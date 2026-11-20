@@ -12,6 +12,9 @@
 // REMOTE is HOST[:PORT]:/absolute/path (PORT 2440 by default), as with scp an
 // argument with ':' before its first '/'. Transfers are checked with CRC32 on
 // the server (--no-verify skips it); a download goes to <file>.part first.
+// 16 requests in flight (-w); the resend timer follows the measured round trip
+// (-t: its start, --min-rto: its floor, 200 ms); ETIMEDOUT after 15 s without a
+// response (-T ms); --dup sends small requests twice. -v prints the counters.
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -44,6 +47,7 @@ struct options
     udpfs::client_config cc;
     bool quiet = false;
     bool verify = true;
+    bool verbose = false;
 };
 
 struct remote
@@ -211,6 +215,17 @@ public:
         return 0;
     }
     udpfs::client &c() { return *cl_; }
+    ~session()
+    {
+        if (cl_ && o_.verbose)
+        {
+            const auto &st = cl_->stats();
+            std::fprintf(stderr,
+                         "udpfs: requests=%" PRIu64 " sends=%" PRIu64 " retransmits=%" PRIu64 " dups=%" PRIu64
+                         " stray=%" PRIu64 " srtt_ms=%.1f rto_ms=%d\n",
+                         st.requests, st.sends, st.retransmits, st.dups, st.stray, st.srtt_ms, st.rto_ms);
+        }
+    }
 
     int download_file(const std::string &rpath, uint64_t size, const std::string &lpath)
     {
@@ -435,7 +450,9 @@ std::string time_str(int64_t t)
 int usage()
 {
     std::fprintf(stderr,
-                 "usage: udpfs [-w window] [-t retransmit_ms] [-n tries] [-q] [--no-verify] COMMAND ...\n"
+                 "usage: udpfs [-w window] [-t initial_rto_ms] [--min-rto ms] [-T give_up_ms] [-q] [-v] [--dup]\n"
+                 "             [--no-verify]\n"
+                 "             COMMAND ...\n"
                  "  cp [-r] SRC DST        one side remote: HOST[:PORT]:/path (port %u)\n"
                  "  get REMOTE [LOCAL]     put LOCAL REMOTE\n"
                  "  ls [-l] REMOTE         stat | cat | crc | rm | mkdir | rmdir REMOTE...\n"
@@ -454,7 +471,7 @@ int main(int argc, char **argv)
     for (; i < args.size() && args[i].size() > 1 && args[i][0] == '-'; ++i)
     {
         const std::string &a = args[i];
-        if ((a == "-w" || a == "-t" || a == "-n") && i + 1 < args.size())
+        if ((a == "-w" || a == "-t" || a == "-T") && i + 1 < args.size())
         {
             const long v = std::strtol(args[++i].c_str(), nullptr, 10);
             if (v <= 0)
@@ -467,11 +484,11 @@ int main(int argc, char **argv)
             }
             else if (a == "-t")
             {
-                o.cc.retransmit_ms = static_cast<int>(v);
+                o.cc.initial_rto_ms = static_cast<int>(v);
             }
             else
             {
-                o.cc.tries = static_cast<int>(v);
+                o.cc.give_up_ms = static_cast<int>(v);
             }
         }
         else if (a == "-q")
@@ -481,6 +498,18 @@ int main(int argc, char **argv)
         else if (a == "--no-verify")
         {
             o.verify = false;
+        }
+        else if (a == "--min-rto" && i + 1 < args.size())
+        {
+            o.cc.min_rto_ms = std::atoi(args[++i].c_str());
+        }
+        else if (a == "--dup")
+        {
+            o.cc.dup_max_bytes = 64;
+        }
+        else if (a == "-v")
+        {
+            o.verbose = true;
         }
         else
         {
