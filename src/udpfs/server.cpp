@@ -309,6 +309,7 @@ void server::dispatch(uint8_t op, uint32_t reqid, wire::reader &r, std::vector<u
         }
         handle_t h;
         h.fd = fd;
+        h.path = path;
         return ok(new_handle(std::move(h)));
     }
     case wire::op_close:
@@ -718,6 +719,30 @@ void server::dispatch(uint8_t op, uint32_t reqid, wire::reader &r, std::vector<u
         writer w(*resp);
         w.u32(crc);
         w.u64(done);
+        return;
+    }
+    case wire::op_list_open:
+    {
+        std::vector<uint8_t> entries;
+        writer w(entries);
+        int32_t count = 0;
+        const size_t room = cfg_.max_datagram - wire::k_response_header;
+        for (const auto &[id, h] : handles_)
+        {
+            const size_t plen = std::min<size_t>(h.path.size(), 0xffff);
+            if (entries.size() + wire::k_open_entry_fixed + plen > room)
+            {
+                break;
+            }
+            w.i32(id);
+            w.u8(h.dir ? wire::type_dir : wire::type_file);
+            w.i64(h.dir ? 0 : h.pos);
+            w.u16(static_cast<uint16_t>(plen));
+            w.bytes(h.path.data(), plen);
+            ++count;
+        }
+        ok(count);
+        writer(*resp).bytes(entries.data(), entries.size());
         return;
     }
     default:

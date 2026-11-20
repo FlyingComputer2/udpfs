@@ -76,6 +76,8 @@ public:
     int fsync(int32_t fd);
     int ftruncate(int32_t fd, uint64_t len);
     int info(wire::info_block *out);
+    // Debug: the server's open handles.
+    int list_open(std::vector<wire::open_entry> *out);
     // One CRC32 request (at most the server's crc_max bytes).
     int crc32(int32_t fd, uint64_t off, uint64_t len, uint32_t seed, uint32_t *crc, uint64_t *n);
 

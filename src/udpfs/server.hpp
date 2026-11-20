@@ -68,7 +68,7 @@ private:
         int fd = -1;
         void *dirp = nullptr; // DIR*
         int64_t pos = 0;      // LSEEK's position
-        std::string path;     // directories: for READDIR's stat
+        std::string path;     // as opened (LIST_OPEN; READDIR's stat for directories)
         bool have_pending = false;
         wire::dir_entry pending; // read from the DIR but not yet sent
     };

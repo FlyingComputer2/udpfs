@@ -7,6 +7,7 @@
 //   udpfs [options] stat | cat | crc | rm | mkdir | rmdir REMOTE...
 //   udpfs [options] mv REMOTE NEWPATH     NEWPATH on the same server
 //   udpfs [options] info HOST[:PORT]
+//   udpfs [options] list_open HOST[:PORT]    debug: the server's open handles
 //
 // REMOTE is HOST[:PORT]:/absolute/path (PORT 2440 by default), as with scp an
 // argument with ':' before its first '/'. Transfers are checked with CRC32 on
@@ -438,7 +439,7 @@ int usage()
                  "  cp [-r] SRC DST        one side remote: HOST[:PORT]:/path (port %u)\n"
                  "  get REMOTE [LOCAL]     put LOCAL REMOTE\n"
                  "  ls [-l] REMOTE         stat | cat | crc | rm | mkdir | rmdir REMOTE...\n"
-                 "  mv REMOTE NEWPATH      info HOST[:PORT]\n",
+                 "  mv REMOTE NEWPATH      info HOST[:PORT]      list_open HOST[:PORT]\n",
                  k_default_port);
     return 2;
 }
@@ -546,6 +547,26 @@ int main(int argc, char **argv)
                     "open_handles=%u\n",
                     in.max_datagram, in.max_path, in.max_handles, in.reply_cache, in.idle_timeout_ms, in.crc_max,
                     in.open_handles);
+        return 0;
+    }
+    if (cmd == "list_open" && rest.size() == 1)
+    {
+        remote r;
+        if (!parse_host(rest[0], &r) || s.connect(r))
+        {
+            return 1;
+        }
+        std::vector<udpfs::wire::open_entry> open;
+        if (const int e = s.c().list_open(&open))
+        {
+            fail(rest[0], e);
+            return 1;
+        }
+        for (const auto &o : open)
+        {
+            std::printf("%11d %s pos=%" PRId64 " %s\n", o.handle, o.type == udpfs::wire::type_dir ? "dir " : "file",
+                        o.pos, o.path.c_str());
+        }
         return 0;
     }
     if (cmd == "mv" && rest.size() == 2)

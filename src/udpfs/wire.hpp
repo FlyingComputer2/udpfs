@@ -32,6 +32,7 @@ enum op : uint8_t
     op_ftruncate = 0x10,
     op_info = 0x11,
     op_crc32 = 0x12,
+    op_list_open = 0x13,
 };
 inline constexpr uint8_t k_response_bit = 0x80;
 
@@ -75,6 +76,15 @@ struct dir_entry
     std::string name;
 };
 inline constexpr size_t k_dir_entry_fixed = 1 + 8 + 8 + 1;
+
+struct open_entry
+{
+    int32_t handle = 0;
+    uint8_t type = type_file;
+    int64_t pos = 0;
+    std::string path;
+};
+inline constexpr size_t k_open_entry_fixed = 4 + 1 + 8 + 2;
 
 struct info_block
 {

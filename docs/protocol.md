@@ -52,6 +52,7 @@ A failed response carries no payload. A response header is 13 bytes.
 | 0x10 | `FTRUNCATE` | i32 `fd`, u64 `len` | 0 | — |
 | 0x11 | `INFO` | — | 0 | server limits, below |
 | 0x12 | `CRC32` | i32 `fd`, u64 `off`, u64 `len`, u32 `seed` | 0 | u32 `crc`, u64 `n` |
+| 0x13 | `LIST_OPEN` | — | open handles listed | open-handle entries (debug) |
 
 `READ` and `WRITE` take the offset in the request (`pread` / `pwrite`). They do not use or move
 the handle's position. `LSEEK` keeps POSIX meaning for the position it reports: `LSEEK fd, 0,
@@ -76,6 +77,10 @@ shrinking or zero-extending.
 most the server's `crc_max` per request. The client continues at `off + n` with the returned
 `crc` as `seed` until it has covered what it wants (`n` = 0 is end of file). This lets a client
 check a transfer without reading the file back over the link.
+
+`LIST_OPEN` is for debugging: the server's open handles, one entry each, as many as fit the
+datagram (`max_handles` is small). Entry: i32 `handle`, u8 `type` (1 file, 2 directory), i64
+`pos` (the `LSEEK` position; 0 for directories), u16 `path_len`, `path` (as opened).
 
 `INFO` lets a client size its requests and window to the server:
 
@@ -188,8 +193,8 @@ only on a trusted link.
 
 ## Retransmission and the reply cache
 
-`READ`, `WRITE`, `STAT`, `FSTAT`, `FSYNC`, `FTRUNCATE`, `INFO` and `CRC32` are idempotent: the
-server runs them again for a retransmission. A repeated `WRITE` at the same offset writes the same
+`READ`, `WRITE`, `STAT`, `FSTAT`, `FSYNC`, `FTRUNCATE`, `INFO`, `CRC32` and `LIST_OPEN` are
+idempotent: the server runs them again for a retransmission. A repeated `WRITE` at the same offset writes the same
 bytes.
 
 Every other operation changes state, so a retransmission must not run it twice. A second

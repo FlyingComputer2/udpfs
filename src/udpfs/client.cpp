@@ -499,6 +499,35 @@ int client::info(wire::info_block *out)
     return 0;
 }
 
+int client::list_open(std::vector<wire::open_entry> *out)
+{
+    std::vector<uint8_t> rb;
+    response r;
+    const int e = call(begin(wire::op_list_open), &rb, &r);
+    if (e)
+    {
+        return e;
+    }
+    reader rd(r.payload, r.payload_n);
+    for (int32_t i = 0; i < r.ret; ++i)
+    {
+        wire::open_entry o;
+        o.handle = rd.i32();
+        o.type = rd.u8();
+        o.pos = rd.i64();
+        o.path.assign(rd.bytes(rd.u16()));
+        if (rd.failed())
+        {
+            return EIO;
+        }
+        if (out)
+        {
+            out->push_back(std::move(o));
+        }
+    }
+    return 0;
+}
+
 int client::crc32(int32_t fd, uint64_t off, uint64_t len, uint32_t seed, uint32_t *crc, uint64_t *n)
 {
     auto b = with_handle(begin(wire::op_crc32), fd);

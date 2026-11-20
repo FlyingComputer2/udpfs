@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <fstream>
+#include <map>
 #include <set>
 
 #include "test_util.hpp"
@@ -321,6 +322,39 @@ TEST_F(ServerTest, ProtocolErrors)
     const uint8_t tiny[3] = {1, 2, 3};
     EXPECT_FALSE(srv.handle(tiny, sizeof(tiny), now, &out));
     EXPECT_EQ(e_isdir, open(dir.path(), o_rdonly).err);
+}
+
+TEST_F(ServerTest, ListOpenShowsHandles)
+{
+    const reply f = open(dir / "lo", o_rdwr | o_creat);
+    auto b = req(op_lseek, ++reqid);
+    writer w(b);
+    w.i32(f.ret);
+    w.i64(42);
+    w.u8(seek_set);
+    send(b);
+    const reply d = path_op(op_opendir, dir.path());
+    const reply l = send(req(op_list_open, ++reqid));
+    ASSERT_EQ(2, l.ret);
+    reader rd(l.payload.data(), l.payload.size());
+    std::map<int32_t, std::pair<uint8_t, std::string>> seen;
+    for (int i = 0; i < 2; ++i)
+    {
+        const int32_t h = rd.i32();
+        const uint8_t t = rd.u8();
+        const int64_t pos = rd.i64();
+        const std::string path(rd.bytes(rd.u16()));
+        if (h == f.ret)
+        {
+            EXPECT_EQ(42, pos);
+        }
+        seen[h] = {t, path};
+    }
+    EXPECT_FALSE(rd.failed());
+    EXPECT_EQ(type_file, seen[f.ret].first);
+    EXPECT_EQ(dir / "lo", seen[f.ret].second);
+    EXPECT_EQ(type_dir, seen[d.ret].first);
+    EXPECT_EQ(dir.path(), seen[d.ret].second);
 }
 
 TEST_F(ServerTest, IdleTimeoutClosesHandles)
