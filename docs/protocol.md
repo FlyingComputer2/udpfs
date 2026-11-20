@@ -86,10 +86,10 @@ no response. The server never sends unsolicited datagrams.
 ## Paths
 
 `path` is UTF-8, absolute (`/sdcard/photo/rov_0001.jpg`), 1 to `max_path` bytes, with no NUL.
-The server serves a set of roots from its configuration (for example `/sdcard` and
-`/winject`), each mapped to a local directory. A path that is not under a root, or that has a
-`.` or `..` component, fails with `EACCES`. Repeated `/` are allowed; a trailing `/` is allowed
-on directories.
+A relative path fails with `EINVAL`. The server passes it to its filesystem as it is, with the
+server's full rights: the client acts as root and can reach every mounted filesystem, the
+link's configuration included (`/winject/winject.conf` on the rover). Nothing is translated or
+fenced off; `.`, `..`, repeated `/` and a trailing `/` mean what the server's filesystem says.
 
 ## Flags, modes and whence
 
@@ -148,8 +148,9 @@ restarted client, or a second one, from repeating ids the server still has cache
 keeps one client's ids distinct. A client may have several requests in flight (for example a
 window of `READ`s at different offsets); responses can arrive in any order, matched by `reqid`.
 
-One client is assumed per handle at a time. The protocol has no authentication; access control
-is the roots and whoever can reach the link.
+One client is assumed per handle at a time. The protocol has no authentication and no access
+control: whoever can reach the server can read, replace or delete any file it can. Expose it
+only on a trusted link.
 
 ## Retransmission and the reply cache
 
@@ -190,7 +191,6 @@ unusual C library writes its own.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `roots` | — | pairs of wire prefix → local directory, e.g. `/sdcard` → `/sdcard` |
 | `max_datagram` | 1400 | largest datagram the server sends or accepts; L3's FEC limit is 1438 |
 | `max_path` | 255 | longest `path` accepted (`ENAMETOOLONG` past it) |
 | `max_handles` | 4 | open `fd`s plus `dir`s at once (ESP-IDF FAT also caps open files per mount) |
@@ -208,8 +208,9 @@ in flight moves ~100 KB/s, until the link's own rate limits it.
 ## ESP-IDF notes
 
 Any SPIFFS or other SPI flash access turns the cache off while it runs. IDF then requires the
-calling task's stack to be in internal RAM (it asserts this in `spi_flash`). A server that has
-a flash root (`/winject`) must therefore run on an internal-RAM stack; one that serves only an
-SD card (SDMMC) can use a PSRAM stack. While the cache is off, the other core and every task
+calling task's stack to be in internal RAM (it asserts this in `spi_flash`). A server that can
+be asked for a file on SPI flash (SPIFFS at `/winject` on the rover) must therefore run on an
+internal-RAM stack. Since every mounted filesystem is reachable, that is any server on a board
+with a flash filesystem mounted. While the cache is off, the other core and every task
 on a PSRAM stack wait, so SPIFFS operations pause other work, video included, for their
 duration.
