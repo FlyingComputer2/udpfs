@@ -51,6 +51,7 @@ A failed response carries no payload. A response header is 13 bytes.
 | 0x0F | `FSYNC` | i32 `fd` | 0 | — |
 | 0x10 | `FTRUNCATE` | i32 `fd`, u64 `len` | 0 | — |
 | 0x11 | `INFO` | — | 0 | server limits, below |
+| 0x12 | `CRC32` | i32 `fd`, u64 `off`, u64 `len`, u32 `seed` | 0 | u32 `crc`, u64 `n` |
 
 `READ` and `WRITE` take the offset in the request (`pread` / `pwrite`). They do not use or move
 the handle's position. `LSEEK` keeps POSIX meaning for the position it reports: `LSEEK fd, 0,
@@ -70,6 +71,12 @@ client has to `UNLINK` the target first, and for a moment neither file exists.
 survive power loss syncs (or closes) before it reports success. `FTRUNCATE` sets the size,
 shrinking or zero-extending.
 
+`CRC32` is the CRC-32 of zlib and PNG (IEEE 802.3, reflected, `crc32(seed, bytes)` with
+`seed` 0 for the first piece) over `n` bytes from `off`: `len` bytes, fewer at end of file, and at
+most the server's `crc_max` per request. The client continues at `off + n` with the returned
+`crc` as `seed` until it has covered what it wants (`n` = 0 is end of file). This lets a client
+check a transfer without reading the file back over the link.
+
 `INFO` lets a client size its requests and window to the server:
 
 | Field | Type | Meaning |
@@ -79,6 +86,7 @@ shrinking or zero-extending.
 | `max_handles` | u32 | |
 | `reply_cache` | u32 | |
 | `idle_timeout_ms` | u32 | |
+| `crc_max` | u32 | |
 | `open_handles` | u32 | handles open now |
 
 `READDIR`: the server packs as many entries as fit the datagram and continues from there on
@@ -180,8 +188,8 @@ only on a trusted link.
 
 ## Retransmission and the reply cache
 
-`READ`, `WRITE`, `STAT`, `FSTAT`, `FSYNC`, `FTRUNCATE` and `INFO` are idempotent: the server
-runs them again for a retransmission. A repeated `WRITE` at the same offset writes the same
+`READ`, `WRITE`, `STAT`, `FSTAT`, `FSYNC`, `FTRUNCATE`, `INFO` and `CRC32` are idempotent: the
+server runs them again for a retransmission. A repeated `WRITE` at the same offset writes the same
 bytes.
 
 Every other operation changes state, so a retransmission must not run it twice. A second
@@ -223,6 +231,7 @@ unusual C library writes its own.
 | `max_handles` | 4 | open `fd`s plus `dir`s at once (ESP-IDF FAT also caps open files per mount) |
 | `reply_cache` | 32 | cached responses ([above](#retransmission-and-the-reply-cache)) |
 | `idle_timeout_ms` | 30000 | [Idle timeout](#idle-timeout) |
+| `crc_max` | 1048576 | bytes one `CRC32` request covers at most (bounds the time it holds the server) |
 
 The client has its own `max_datagram`, retransmit interval, retry limit and read/write window.
 
