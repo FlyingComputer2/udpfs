@@ -47,6 +47,10 @@ A failed response carries no payload. A response header is 13 bytes.
 | 0x0B | `OPENDIR` | `path` | directory handle `dir` | — |
 | 0x0C | `READDIR` | i32 `dir`, u8 `rflags` | entries in this response (0 = end) | entries |
 | 0x0D | `CLOSEDIR` | i32 `dir` | 0 | — |
+| 0x0E | `RENAME` | u16 `from_len`, `from` (`from_len` bytes), `to` | 0 | — |
+| 0x0F | `FSYNC` | i32 `fd` | 0 | — |
+| 0x10 | `FTRUNCATE` | i32 `fd`, u64 `len` | 0 | — |
+| 0x11 | `INFO` | — | 0 | server limits, below |
 
 `READ` and `WRITE` take the offset in the request (`pread` / `pwrite`). They do not use or move
 the handle's position. `LSEEK` keeps POSIX meaning for the position it reports: `LSEEK fd, 0,
@@ -57,6 +61,25 @@ SEEK_END` gives the current file size. The position is otherwise only used by `L
 
 `READ`: the server returns at most `len` bytes, and at most what fits the server's datagram
 limit (`max_datagram` − 13). A short read is not end of file; only `ret` = 0 is.
+
+`RENAME` is POSIX `rename()`, and takes whatever the server's filesystem does with an existing
+`to`: Linux replaces it atomically, but ESP-IDF's FAT and SPIFFS fail with `EEXIST`. There the
+client has to `UNLINK` the target first, and for a moment neither file exists.
+
+`FSYNC` flushes the file to its medium; `CLOSE` does too. A client that needs a file to
+survive power loss syncs (or closes) before it reports success. `FTRUNCATE` sets the size,
+shrinking or zero-extending.
+
+`INFO` lets a client size its requests and window to the server:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `max_datagram` | u32 | [Configuration](#configuration) |
+| `max_path` | u32 | |
+| `max_handles` | u32 | |
+| `reply_cache` | u32 | |
+| `idle_timeout_ms` | u32 | |
+| `open_handles` | u32 | handles open now |
 
 `READDIR`: the server packs as many entries as fit the datagram and continues from there on
 the next `READDIR`. Bit 0 of `rflags` asks for `size` and `mtime` (one `stat` per entry on the
@@ -80,7 +103,8 @@ Stat block (`STAT`, `FSTAT`):
 | `mtime` | i64 | seconds since 1970-01-01 UTC |
 
 An unknown `op` gets a response with `ret` = −1, `err` = `ENOSYS`. A request too short for its
-fields, or with a field out of range, gets `EPROTO`. A datagram shorter than the header gets
+fields, or with a field out of range, gets `EPROTO`; one longer than the server's
+`max_datagram` gets `EMSGSIZE`. A datagram shorter than the header gets
 no response. The server never sends unsolicited datagrams.
 
 ## Paths
@@ -129,6 +153,7 @@ through its [configuration](#configuration); a native value with no wire value b
 | `EEXIST` | 17 | | `ENAMETOOLONG` | 36 |
 | `EXDEV` | 18 | | `ENOSYS` | 38 |
 | `ENOTEMPTY` | 39 | | `EPROTO` | 71 |
+| `ENOTSUP` | 95 | | `EMSGSIZE` | 90 |
 
 `EBADF` also answers a handle the server does not know (closed, or dropped at the idle
 timeout). `EMFILE` answers an `OPEN` / `OPENDIR` past the server's `max_handles`.
@@ -137,8 +162,9 @@ timeout). `EMFILE` answers an `OPEN` / `OPENDIR` past the server's `max_handles`
 
 `fd` and `dir` are server-chosen non-negative numbers, one namespace for both. The client keeps
 its own mapping from them to its file and `DIR*` objects. The server never reuses a number while
-it runs: it counts up from 1 and wraps at 2^31. So a late or duplicate request for a closed
-handle gets `EBADF`, never another file.
+it runs: it starts at a random value in [1, 2^30) when it starts and counts up, wrapping from
+2^31 − 1 to 1. So a late or duplicate request for a closed handle gets `EBADF`, never another
+file, also across a server restart.
 
 ## Request ids
 
@@ -154,15 +180,16 @@ only on a trusted link.
 
 ## Retransmission and the reply cache
 
-`READ`, `WRITE`, `STAT` and `FSTAT` are idempotent: the server runs them again for a
-retransmission. A repeated `WRITE` at the same offset writes the same bytes.
+`READ`, `WRITE`, `STAT`, `FSTAT`, `FSYNC`, `FTRUNCATE` and `INFO` are idempotent: the server
+runs them again for a retransmission. A repeated `WRITE` at the same offset writes the same
+bytes.
 
 Every other operation changes state, so a retransmission must not run it twice. A second
 `OPEN` would leak a handle, a second `UNLINK` would report `ENOENT`, and a second `READDIR`
 would skip entries. The server keeps the responses to these in a reply cache of the last
 `reply_cache` entries. Each is keyed by (`op`, handle or −1, `reqid`), where the handle is the
 request's `fd` / `dir` for `CLOSE`, `LSEEK`, `READDIR`, `CLOSEDIR`, and −1 for the path
-operations. A request whose key is in the cache gets the cached response again, byte for byte,
+operations (`OPEN`, `UNLINK`, `MKDIR`, `RMDIR`, `OPENDIR`, `RENAME`). A request whose key is in the cache gets the cached response again, byte for byte,
 without running. The cache is cleared at the idle timeout.
 
 ## Idle timeout
@@ -206,6 +233,9 @@ Over the rover link (RTT ~110 ms) one request at a time moves ~12 KB/s. A window
 in flight moves ~100 KB/s, until the link's own rate limits it.
 
 ## ESP-IDF notes
+
+ESP-IDF's SPIFFS has no directories: names hold `/` (`/winject/a/b.txt` is one file),
+`MKDIR` / `RMDIR` fail with `ENOTSUP`, and `OPENDIR` on the mount point lists every file.
 
 Any SPIFFS or other SPI flash access turns the cache off while it runs. IDF then requires the
 calling task's stack to be in internal RAM (it asserts this in `spi_flash`). A server that can
